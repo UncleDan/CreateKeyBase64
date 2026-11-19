@@ -91,7 +91,13 @@ function ConvertTo-PlainText([Security.SecureString]$Secure) {
     return [System.Net.NetworkCredential]::new('', $Secure).Password
 }
 
-function Read-Password([string]$Prompt, [int]$MinLength = 6) {
+function Write-Help([string[]]$Lines) {
+    Write-Host ''
+    foreach ($line in $Lines) { if ($line) { Write-Host "  $line" -ForegroundColor DarkGray } }
+}
+
+function Read-Password([string]$Prompt, [string[]]$Help, [int]$MinLength = 6) {
+    Write-Help $Help
     while ($true) {
         $first = ConvertTo-PlainText (Read-Host -Prompt $Prompt -AsSecureString)
         if ($first.Length -lt $MinLength) {
@@ -104,7 +110,8 @@ function Read-Password([string]$Prompt, [int]$MinLength = 6) {
     }
 }
 
-function Read-Value([string]$Prompt, [string]$Default, [switch]$Optional) {
+function Read-Value([string]$Prompt, [string[]]$Help, [string]$Default, [switch]$Optional) {
+    Write-Help $Help
     $label = if ($Default) { "$Prompt [$Default]" } else { $Prompt }
     while ($true) {
         $value = (Read-Host -Prompt $label).Trim()
@@ -114,7 +121,8 @@ function Read-Value([string]$Prompt, [string]$Default, [switch]$Optional) {
     }
 }
 
-function Read-YesNo([string]$Prompt, [bool]$Default = $true) {
+function Read-YesNo([string]$Prompt, [string[]]$Help, [bool]$Default = $true) {
+    Write-Help $Help
     $hint = if ($Default) { 'Y/n' } else { 'y/N' }
     while ($true) {
         $answer = (Read-Host -Prompt "$Prompt [$hint]").Trim()
@@ -140,17 +148,32 @@ function Find-Keytool {
     throw 'keytool not found. Install a JDK (or Android Studio) and set JAVA_HOME, or add keytool to PATH.'
 }
 
+# GitHub Actions secret names produced by this script.
+$names = [ordered]@{
+    Keystore      = "${SecretPrefix}_KEYSTORE_BASE64"
+    StorePassword = "${SecretPrefix}_KEYSTORE_PASSWORD"
+    Alias         = "${SecretPrefix}_KEY_ALIAS"
+    KeyPassword   = "${SecretPrefix}_KEY_PASSWORD"
+}
+
 # --- 0. Ask for anything that was not supplied ------------------------------
 # Run with no parameters for a fully guided (wizard) mode.
 $wizard = $PSBoundParameters.Count -eq 0
 
 if (-not $KeystorePath) {
-    $KeystorePath = Read-Value 'Keystore path' -Default (Join-Path (Get-Location) 'release.jks')
+    $KeystorePath = Read-Value 'Keystore file path' -Default (Join-Path (Get-Location) 'release.jks') -Help @(
+        'The signing keystore file (.jks or .keystore): an existing one to encode, or where to create a new one.',
+        'Example: C:\keys\myapp-release.jks',
+        "Its Base64 content goes into the secret $($names.Keystore)."
+    )
 }
 $KeystorePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($KeystorePath)
 
 if (-not $Generate -and -not (Test-Path $KeystorePath)) {
-    if (Read-YesNo "'$KeystorePath' does not exist. Generate a new keystore?") {
+    if (Read-YesNo 'Generate a new keystore?' -Help @(
+            "'$KeystorePath' does not exist.",
+            'Answer y to create a new signing key there, n to stop.'
+        )) {
         $Generate = $true
     } else {
         throw "Keystore not found: '$KeystorePath'."
@@ -158,13 +181,28 @@ if (-not $Generate -and -not (Test-Path $KeystorePath)) {
 }
 
 if (-not $Alias) {
-    $Alias = Read-Value 'Key alias' -Default $(if ($Generate) { 'upload' } else { '' })
+    $aliasHelp = if ($Generate) {
+        @('Name of the key inside the new keystore: short, no spaces.',
+          'Example: upload  or  myapp')
+    } else {
+        @('Name of the key inside the existing keystore (the alias chosen when it was created).',
+          'To list it: keytool -list -keystore <file>')
+    }
+    $Alias = Read-Value 'Key alias' -Default $(if ($Generate) { 'upload' } else { '' }) -Help (
+        $aliasHelp + "Goes into the secret $($names.Alias)."
+    )
 }
 
 if ($wizard) {
-    $CopyToClipboard = Read-YesNo 'Copy the Base64 string to the clipboard?'
+    $CopyToClipboard = Read-YesNo 'Copy the Base64 string to the clipboard?' -Help @(
+        "So you can paste it as the value of the secret $($names.Keystore) in GitHub."
+    )
     while ($true) {
-        $repo = Read-Value 'GitHub repository to upload the secrets to (owner/repo, Enter to skip)' -Optional
+        $repo = Read-Value 'GitHub repository (owner/repo)' -Optional -Help @(
+            'The repository whose GitHub Actions build the app. Example: myuser/myapp',
+            "The secrets $($names.Values -join ', ') will be created there",
+            'with the GitHub CLI (gh). Press Enter to skip and add them manually.'
+        )
         if (-not $repo) { break }
         if ($repo -match '^[\w.-]+/[\w.-]+$') { $GitHubRepo = $repo; break }
         Write-Warning "Invalid format, expected 'owner/repo'."
@@ -179,17 +217,20 @@ if ($Generate) {
         throw "'$KeystorePath' already exists. Remove it or omit -Generate to encode it."
     }
     if (-not $DName) {
-        Write-Host 'Certificate details (press Enter to skip a field):' -ForegroundColor Cyan
+        Write-Help @(
+            'Certificate details. These are NOT secrets: they are stored in the certificate',
+            'and visible to anyone who inspects the app. Press Enter to skip a field (at least one is required).'
+        )
         $fields = [ordered]@{
-            CN = 'First and last name'
-            OU = 'Organizational unit'
-            O  = 'Organization'
-            L  = 'City or locality'
-            ST = 'State or province'
-            C  = 'Two-letter country code'
+            CN = 'Your name or the developer name, e.g. John Doe'
+            OU = 'Organizational unit, e.g. Mobile'
+            O  = 'Organization or company, e.g. Example Ltd'
+            L  = 'City, e.g. Rome'
+            ST = 'State or province, e.g. Lazio'
+            C  = 'Two-letter country code, e.g. IT'
         }
         $parts = foreach ($key in $fields.Keys) {
-            $value = Read-Host "  $($fields[$key])"
+            $value = Read-Host "  $key - $($fields[$key])"
             if ($value) { "$key=$($value -replace ',', '\,')" }
         }
         if (-not $parts) { throw 'At least one certificate field is required.' }
@@ -198,7 +239,11 @@ if ($Generate) {
 
     # Modern keytool creates PKCS12 keystores, where the key password must equal
     # the store password, so a single password is used for both.
-    $storePassword = Read-Password 'Keystore password'
+    $storePassword = Read-Password 'Keystore password' -Help @(
+        'Password protecting the new keystore and its key (at least 6 characters). Write it down: if lost,',
+        'you can no longer sign updates of the app.',
+        "Goes into the secrets $($names.StorePassword) and $($names.KeyPassword) (same value)."
+    )
 
     $keytool = Find-Keytool
     $dir = Split-Path -Parent $KeystorePath
@@ -251,20 +296,27 @@ if ($CopyToClipboard) {
 }
 
 # --- 4. Secrets ---------------------------------------------------------------
-$names = [ordered]@{
-    Keystore      = "${SecretPrefix}_KEYSTORE_BASE64"
-    StorePassword = "${SecretPrefix}_KEYSTORE_PASSWORD"
-    Alias         = "${SecretPrefix}_KEY_ALIAS"
-    KeyPassword   = "${SecretPrefix}_KEY_PASSWORD"
-}
 
 if ($GitHubRepo) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         throw 'GitHub CLI (gh) not found. Install it from https://cli.github.com and run "gh auth login".'
     }
-    if (-not $storePassword) { $storePassword = ConvertTo-PlainText (Read-Host 'Keystore password' -AsSecureString) }
-    $keyPassword = ConvertTo-PlainText (Read-Host 'Key password (press Enter if same as keystore password)' -AsSecureString)
-    if (-not $keyPassword) { $keyPassword = $storePassword }
+    if (-not $storePassword) {
+        Write-Help @(
+            'Password of the existing keystore file.',
+            "Goes into the secret $($names.StorePassword)."
+        )
+        $storePassword = ConvertTo-PlainText (Read-Host 'Keystore password' -AsSecureString)
+        Write-Help @(
+            "Password of the key '$Alias'. Usually the same as the keystore password",
+            '(always the same for PKCS12 keystores): press Enter to reuse it.',
+            "Goes into the secret $($names.KeyPassword)."
+        )
+        $keyPassword = ConvertTo-PlainText (Read-Host 'Key password' -AsSecureString)
+        if (-not $keyPassword) { $keyPassword = $storePassword }
+    } else {
+        $keyPassword = $storePassword
+    }
 
     $values = @{
         $names.Keystore      = $base64
@@ -284,7 +336,7 @@ if ($GitHubRepo) {
     Write-Host "  $($names.Keystore)  = contents of $OutputFile"
     Write-Host "  $($names.StorePassword)  = keystore password"
     Write-Host "  $($names.Alias)  = $Alias"
-    Write-Host "  $($names.KeyPassword)  = key password"
+    Write-Host "  $($names.KeyPassword)  = key password (same as the keystore password for PKCS12)"
 }
 
 Write-Host ''
