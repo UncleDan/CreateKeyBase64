@@ -12,6 +12,18 @@ as Base64, so you can store it in a GitHub Actions secret and sign release build
 
 ## Usage
 
+Run the script with no parameters for a guided mode: it asks for the keystore path,
+offers to generate the keystore if it does not exist, then asks for the alias, whether
+to copy the result to the clipboard, and which GitHub repository (if any) to upload
+the secrets to:
+
+```powershell
+./New-KeystoreBase64.ps1
+```
+
+All parameters are optional: any required value that is not supplied is asked for
+interactively.
+
 Generate a new keystore, encode it, and copy the Base64 string to the clipboard:
 
 ```powershell
@@ -40,9 +52,9 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 | Parameter          | Description                                                              |
 | ------------------ | ------------------------------------------------------------------------ |
-| `-KeystorePath`    | Keystore to encode, or to create with `-Generate` (required)             |
+| `-KeystorePath`    | Keystore to encode, or to create with `-Generate` (prompted if missing)  |
 | `-Generate`        | Create a new keystore with `keytool`                                     |
-| `-Alias`           | Key alias                                                                |
+| `-Alias`           | Key alias (prompted if missing)                                          |
 | `-OutputFile`      | Where to write the Base64 string (default `<keystore>.base64.txt`)       |
 | `-ValidityDays`    | Key validity when generating (default `10000`)                           |
 | `-DName`           | Certificate subject, e.g. `"CN=John Doe, O=Example, C=US"` (else prompted) |

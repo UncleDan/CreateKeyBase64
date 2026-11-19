@@ -12,6 +12,9 @@
       3. Writes the string to a text file and, optionally, copies it to the clipboard.
       4. Optionally uploads all signing secrets to a GitHub repository with the gh CLI.
 
+    Every parameter is optional: anything required that is missing is asked for
+    interactively. Run the script with no parameters for a fully guided mode.
+
     Works with Windows PowerShell 5.1 and PowerShell 7+ (Windows, macOS, Linux).
 
 .PARAMETER KeystorePath
@@ -45,6 +48,11 @@
     Prefix for the secret names (default "ANDROID").
 
 .EXAMPLE
+    ./New-KeystoreBase64.ps1
+
+    Fully interactive: asks for the keystore path, alias, clipboard and GitHub upload.
+
+.EXAMPLE
     ./New-KeystoreBase64.ps1 -KeystorePath .\release.jks -Generate -Alias upload -CopyToClipboard
 
 .EXAMPLE
@@ -55,7 +63,6 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
     [string]$KeystorePath,
 
     [switch]$Generate,
@@ -97,6 +104,27 @@ function Read-Password([string]$Prompt, [int]$MinLength = 6) {
     }
 }
 
+function Read-Value([string]$Prompt, [string]$Default, [switch]$Optional) {
+    $label = if ($Default) { "$Prompt [$Default]" } else { $Prompt }
+    while ($true) {
+        $value = (Read-Host -Prompt $label).Trim()
+        if (-not $value) { $value = $Default }
+        if ($value -or $Optional) { return $value }
+        Write-Warning 'A value is required.'
+    }
+}
+
+function Read-YesNo([string]$Prompt, [bool]$Default = $true) {
+    $hint = if ($Default) { 'Y/n' } else { 'y/N' }
+    while ($true) {
+        $answer = (Read-Host -Prompt "$Prompt [$hint]").Trim()
+        if (-not $answer) { return $Default }
+        if ($answer -match '^(y|yes)$') { return $true }
+        if ($answer -match '^(n|no)$') { return $false }
+        Write-Warning 'Please answer y or n.'
+    }
+}
+
 function Find-Keytool {
     $exe = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'keytool.exe' } else { 'keytool' }
     $candidates = @()
@@ -112,7 +140,37 @@ function Find-Keytool {
     throw 'keytool not found. Install a JDK (or Android Studio) and set JAVA_HOME, or add keytool to PATH.'
 }
 
+# --- 0. Ask for anything that was not supplied ------------------------------
+# Run with no parameters for a fully guided (wizard) mode.
+$wizard = $PSBoundParameters.Count -eq 0
+
+if (-not $KeystorePath) {
+    $KeystorePath = Read-Value 'Keystore path' -Default (Join-Path (Get-Location) 'release.jks')
+}
 $KeystorePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($KeystorePath)
+
+if (-not $Generate -and -not (Test-Path $KeystorePath)) {
+    if (Read-YesNo "'$KeystorePath' does not exist. Generate a new keystore?") {
+        $Generate = $true
+    } else {
+        throw "Keystore not found: '$KeystorePath'."
+    }
+}
+
+if (-not $Alias) {
+    $Alias = Read-Value 'Key alias' -Default $(if ($Generate) { 'upload' } else { '' })
+}
+
+if ($wizard) {
+    $CopyToClipboard = Read-YesNo 'Copy the Base64 string to the clipboard?'
+    while ($true) {
+        $repo = Read-Value 'GitHub repository to upload the secrets to (owner/repo, Enter to skip)' -Optional
+        if (-not $repo) { break }
+        if ($repo -match '^[\w.-]+/[\w.-]+$') { $GitHubRepo = $repo; break }
+        Write-Warning "Invalid format, expected 'owner/repo'."
+    }
+}
+
 $storePassword = $null
 
 # --- 1. Generate the keystore if requested -----------------------------------
@@ -120,9 +178,6 @@ if ($Generate) {
     if (Test-Path $KeystorePath) {
         throw "'$KeystorePath' already exists. Remove it or omit -Generate to encode it."
     }
-    if (-not $Alias) { $Alias = Read-Host 'Key alias (e.g. upload)' }
-    if (-not $Alias) { throw 'An alias is required.' }
-
     if (-not $DName) {
         Write-Host 'Certificate details (press Enter to skip a field):' -ForegroundColor Cyan
         $fields = [ordered]@{
@@ -163,7 +218,7 @@ if ($Generate) {
 }
 
 if (-not (Test-Path $KeystorePath -PathType Leaf)) {
-    throw "Keystore not found: '$KeystorePath'. Use -Generate to create a new one."
+    throw "Keystore not found: '$KeystorePath'."
 }
 
 # --- 2. Encode as single-line Base64 -----------------------------------------
@@ -207,7 +262,6 @@ if ($GitHubRepo) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         throw 'GitHub CLI (gh) not found. Install it from https://cli.github.com and run "gh auth login".'
     }
-    if (-not $Alias) { $Alias = Read-Host 'Key alias' }
     if (-not $storePassword) { $storePassword = ConvertTo-PlainText (Read-Host 'Keystore password' -AsSecureString) }
     $keyPassword = ConvertTo-PlainText (Read-Host 'Key password (press Enter if same as keystore password)' -AsSecureString)
     if (-not $keyPassword) { $keyPassword = $storePassword }
@@ -229,7 +283,7 @@ if ($GitHubRepo) {
     Write-Host 'Add these secrets in GitHub: Settings > Secrets and variables > Actions' -ForegroundColor Cyan
     Write-Host "  $($names.Keystore)  = contents of $OutputFile"
     Write-Host "  $($names.StorePassword)  = keystore password"
-    Write-Host "  $($names.Alias)  = $(if ($Alias) { $Alias } else { '<your key alias>' })"
+    Write-Host "  $($names.Alias)  = $Alias"
     Write-Host "  $($names.KeyPassword)  = key password"
 }
 
