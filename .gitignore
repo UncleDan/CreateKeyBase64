@@ -1,0 +1,7 @@
+# Never commit signing material
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.base64.txt
+keystore.properties
