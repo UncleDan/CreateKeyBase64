@@ -1,93 +1,124 @@
 # CreateKeyBase64
 
-A PowerShell script that creates (or reuses) an Android signing keystore and encodes it
-as Base64, so you can store it in a GitHub Actions secret and sign release builds in CI.
+A PowerShell script that creates (or reuses) an Android signing keystore and prepares
+everything GitHub Actions needs to sign release builds:
+
+- a **TXT file with all the secrets** (name and value) ready to copy and paste into GitHub;
+- optionally, the secrets **uploaded directly** with the GitHub CLI.
+
+## Quick start (Windows)
+
+Double-click **`New-KeystoreBase64.cmd`**. The script asks for every value and explains
+next to each question what to enter and which secret it goes into.
+
+The `.cmd` launcher runs the script with the Execution Policy bypassed for that run only,
+prefers PowerShell 7 when installed, and pauses at the end when started by double-click.
+It accepts the same parameters as the script (`New-KeystoreBase64.cmd /?` shows them).
+
+From PowerShell:
+
+```powershell
+./New-KeystoreBase64.ps1          # guided mode
+./New-KeystoreBase64.ps1 -Help    # parameter summary
+```
 
 ## Requirements
 
 - Windows PowerShell 5.1 or PowerShell 7+ (Windows, macOS, Linux)
-- A JDK providing `keytool` (only needed with `-Generate`). The script looks in
-  `JAVA_HOME`, then `PATH`, then Android Studio's bundled JDK.
-- [GitHub CLI](https://cli.github.com) (only needed with `-GitHubRepo`)
+- `keytool`, searched in `JAVA_HOME`, `PATH`, Android Studio's bundled JDK and the common
+  JDK folders. If it is missing on Windows x64, the script offers to download a portable
+  Temurin 17 JRE, use it and delete it at the end.
+- [GitHub CLI](https://cli.github.com) (`gh auth login`), only to upload the secrets with `-GitHubRepo`
 
-## Usage
+## Parameters
 
-Run the script with no parameters for a guided mode: it asks for the keystore path,
-offers to generate the keystore if it does not exist, then asks for the alias, whether
-to copy the result to the clipboard, and which GitHub repository (if any) to upload
-the secrets to:
+All parameters are optional: any required value that is missing is asked for.
 
-```powershell
-./New-KeystoreBase64.ps1
-```
+| Parameter          | Description                                                            | Default                         |
+| ------------------ | ---------------------------------------------------------------------- | ------------------------------- |
+| `-KeystorePath`    | Keystore to encode, or to create (`.p12`, `.jks`, `.keystore`)        | asked                           |
+| `-Generate`        | Create a new keystore (offered anyway if the file does not exist)     |                                 |
+| `-Alias`           | Key alias, goes into `KEY_ALIAS`                                       | asked                           |
+| `-DName`           | Certificate owner, e.g. `"CN=John Doe, O=Example, L=Rome, C=IT"`       | asked field by field            |
+| `-KeySize`         | RSA key size: `2048`, `3072`, `4096`                                   | `4096`                          |
+| `-ValidityDays`    | Certificate validity in days                                           | `10000` (about 27 years)        |
+| `-SecretPrefix`    | Prefix for secret names: `MYAPP` gives `MYAPP_KEYSTORE_BASE64`, ...    | none                            |
+| `-OutputFile`      | TXT file with all the secrets                                          | `<keystore>.github-secrets.txt` |
+| `-GitHubRepo`      | `owner/repo`: upload the secrets with `gh secret set`                  |                                 |
+| `-CopyToClipboard` | Also copy the Base64 string to the clipboard                           |                                 |
+| `-Help`, `-h`      | Show the parameter summary                                             |                                 |
 
-All parameters are optional: any required value that is not supplied is asked for
-interactively.
+Passwords are always asked for with hidden input, never passed as parameters.
 
-Generate a new keystore, encode it, and copy the Base64 string to the clipboard:
-
-```powershell
-./New-KeystoreBase64.ps1 -KeystorePath .\release.jks -Generate -Alias upload -CopyToClipboard
-```
-
-Encode an existing keystore:
-
-```powershell
-./New-KeystoreBase64.ps1 -KeystorePath .\existing.keystore -Alias mykey
-```
-
-Encode and upload all four secrets directly to a repository:
+### Examples
 
 ```powershell
-./New-KeystoreBase64.ps1 -KeystorePath .\release.jks -Alias upload -GitHubRepo myuser/myapp
+# New keystore, everything else asked
+./New-KeystoreBase64.ps1 -KeystorePath .\myapp.p12 -Generate -Alias myapp -DName "CN=John Doe, C=IT"
+
+# Existing keystore, prefixed secret names, uploaded with gh
+./New-KeystoreBase64.ps1 -KeystorePath .\old.jks -Alias upload -SecretPrefix MYAPP -GitHubRepo myuser/myapp
 ```
 
-If script execution is blocked on Windows, run it for the current session only:
+## What the script does
 
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+1. **New keystore:** PKCS12, RSA 4096, `SHA256withRSA`, one password for both the keystore
+   and the key (PKCS12 requires them to be equal). An existing file is never overwritten.
+2. **Existing keystore:** opens it with keytool to check the password and alias before
+   writing anything.
+3. Passwords reach keytool through environment variables (`-storepass:env`), so they never
+   appear on the command line. The variables are removed at the end.
+4. Encodes the keystore as single-line Base64 (no line breaks, unlike `certutil -encode`).
+5. Writes the TXT file, which looks like this:
+
+```
+GitHub Actions secrets for Android signing
+...
+Where: Settings > Secrets and variables > Actions > New repository secret
+       https://github.com/myuser/myapp/settings/secrets/actions/new
+
+======================================================================
+Name:
+KEYSTORE_BASE64
+
+Secret:
+MIIKXAIBAzCCCgYGCSqGSIb3DQEHAaCCCfcEggnzMIIJ7zCCBWMGCSqGSIb3DQEHAaCC...
+
+======================================================================
+Name:
+KEYSTORE_PASSWORD
+...
+======================================================================
+Not secrets, for reference (Google Play Console, Firebase, F-Droid...):
+  Alias:   myapp
+  SHA1: 4E:20:EF:...
+  SHA256: 37:48:88:...
 ```
 
-### Parameters
+## Secrets
 
-| Parameter          | Description                                                              |
-| ------------------ | ------------------------------------------------------------------------ |
-| `-KeystorePath`    | Keystore to encode, or to create with `-Generate` (prompted if missing)  |
-| `-Generate`        | Create a new keystore with `keytool`                                     |
-| `-Alias`           | Key alias (prompted if missing)                                          |
-| `-OutputFile`      | Where to write the Base64 string (default `<keystore>.base64.txt`)       |
-| `-ValidityDays`    | Key validity when generating (default `10000`)                           |
-| `-DName`           | Certificate subject, e.g. `"CN=John Doe, O=Example, C=US"` (else prompted) |
-| `-CopyToClipboard` | Copy the Base64 string to the clipboard                                  |
-| `-GitHubRepo`      | `owner/repo`: upload the secrets with `gh secret set`                    |
-| `-SecretPrefix`    | Prefix for secret names (default `ANDROID`)                              |
+| Secret              | Value                                       |
+| ------------------- | ------------------------------------------- |
+| `KEYSTORE_BASE64`   | The keystore encoded as Base64              |
+| `KEYSTORE_PASSWORD` | Keystore password                           |
+| `KEY_ALIAS`         | Key alias                                   |
+| `KEY_PASSWORD`      | Key password (same as keystore for PKCS12) |
 
-Passwords are always prompted for securely and are never passed as script arguments.
-
-## GitHub secrets
-
-| Secret                      | Value                                   |
-| --------------------------- | --------------------------------------- |
-| `ANDROID_KEYSTORE_BASE64`   | Contents of the generated `.base64.txt` |
-| `ANDROID_KEYSTORE_PASSWORD` | Keystore password                       |
-| `ANDROID_KEY_ALIAS`         | Key alias                               |
-| `ANDROID_KEY_PASSWORD`      | Key password                            |
-
-Add them under **Settings > Secrets and variables > Actions**, or let the script do it with `-GitHubRepo`.
+With `-SecretPrefix MYAPP` they become `MYAPP_KEYSTORE_BASE64`, `MYAPP_KEYSTORE_PASSWORD`, ...
 
 ## Using the secrets in a workflow
 
 ```yaml
 - name: Decode keystore
-  run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/release.jks"
+  run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/release.p12"
 
 - name: Build signed release
   run: ./gradlew assembleRelease bundleRelease
   env:
-    ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
-    ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-    ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-    ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    KEYSTORE_PATH: ${{ runner.temp }}/release.p12
+    KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+    KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+    KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 ```
 
 And in `app/build.gradle.kts`:
@@ -96,10 +127,10 @@ And in `app/build.gradle.kts`:
 android {
     signingConfigs {
         create("release") {
-            System.getenv("ANDROID_KEYSTORE_PATH")?.let { storeFile = file(it) }
-            storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("ANDROID_KEY_ALIAS")
-            keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            System.getenv("KEYSTORE_PATH")?.let { storeFile = file(it) }
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
         }
     }
     buildTypes {
@@ -112,7 +143,8 @@ android {
 
 ## Security
 
-- Never commit the keystore or the `.base64.txt` file (both are in `.gitignore`).
-- Back up the keystore and its passwords: if you lose them you cannot publish updates
-  (unless you use Play App Signing with an upload key that can be reset).
-- Delete the `.base64.txt` file once the secret has been saved.
+- The TXT file contains the passwords in plain text: **delete it** once the secrets are saved.
+- Never commit the keystore or the TXT file (both are in `.gitignore`).
+- Back up the keystore and its password in at least two safe places (e.g. a password
+  manager and an offline backup): without them you cannot publish updates of the app.
+- The certificate owner (DN) is readable by anyone who opens the APK.

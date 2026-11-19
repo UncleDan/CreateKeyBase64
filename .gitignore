@@ -4,4 +4,6 @@
 *.p12
 *.pfx
 *.base64.txt
+*.b64.txt
+*.github-secrets.txt
 keystore.properties
