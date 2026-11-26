@@ -1,3 +1,4 @@
+# New-KeystoreBase64.ps1 by Daniele Lolli (UncleDan) feat. Claude AI - Release 1.2 - 2026-11-22 14-43-14
 <#
 .SYNOPSIS
     Creates (or reuses) an Android signing keystore and prepares the GitHub Actions secrets.
@@ -32,6 +33,17 @@
 .PARAMETER DName
     Certificate owner, e.g. "CN=John Doe, O=Example, C=US". Prompted field by field if missing.
 
+.PARAMETER GeneratePassword
+    Only with a new keystore: generate a random password instead of typing it.
+    It is shown once at the end and written to the TXT file: save it in a password manager.
+    In guided mode it is offered (default: yes).
+
+.PARAMETER PasswordLength
+    Length of the generated password, 16-128 (default 32). The password always contains
+    digits, uppercase and lowercase letters and the special characters - _ . + : @ /
+    which need no quoting or escaping in CMD/DOS, PowerShell, Bash/sh or MySQL;
+    it never starts with a special character.
+
 .PARAMETER KeySize
     RSA key size when generating: 2048, 3072 or 4096 (default 4096).
 
@@ -65,6 +77,11 @@
 
 .EXAMPLE
     ./New-KeystoreBase64.ps1 -KeystorePath .\existing.jks -Alias upload -SecretPrefix MYAPP -GitHubRepo myuser/myapp
+
+.EXAMPLE
+    ./New-KeystoreBase64.ps1 -KeystorePath .\myapp.p12 -Generate -Alias myapp -DName "CN=John Doe, C=US" -GeneratePassword
+
+    New keystore with a random 32-character password.
 #>
 [CmdletBinding()]
 param(
@@ -75,6 +92,11 @@ param(
     [string]$Alias,
 
     [string]$DName,
+
+    [switch]$GeneratePassword,
+
+    [ValidateRange(16, 128)]
+    [int]$PasswordLength = 32,
 
     [ValidateSet(2048, 3072, 4096)]
     [int]$KeySize = 4096,
@@ -113,6 +135,8 @@ Parameters (all optional):
   -Generate               Create a new keystore (offered anyway if the file is missing)
   -Alias <name>           Key alias, goes into KEY_ALIAS
   -DName "<dn>"           Certificate owner, e.g. "CN=John Doe, O=Example, L=Rome, C=IT"
+  -GeneratePassword       New keystore only: random password instead of typing it
+  -PasswordLength <n>     Length of the generated password, 16-128  (default 32)
   -KeySize <n>            2048 | 3072 | 4096                       (default 4096)
   -ValidityDays <n>       Certificate validity in days            (default 10000)
   -SecretPrefix <text>    Prefix for secret names: MYAPP -> MYAPP_KEYSTORE_BASE64
@@ -128,6 +152,7 @@ Secrets produced (with the optional prefix):
 Examples:
   ./$me
   ./$me -KeystorePath .\myapp.p12 -Generate -Alias myapp -DName "CN=John Doe, C=IT"
+  ./$me -KeystorePath .\myapp.p12 -Generate -Alias myapp -DName "CN=John Doe, C=IT" -GeneratePassword
   ./$me -KeystorePath .\old.jks -Alias upload -SecretPrefix MYAPP -GitHubRepo myuser/myapp
 
 Full help:  Get-Help ./$me -Detailed
@@ -185,6 +210,45 @@ function Read-YesNo([string]$Prompt, [string[]]$Help, [bool]$Default = $true) {
 }
 
 function Test-IsWindows { return ($env:OS -eq 'Windows_NT') }
+
+# Random password from a cryptographic generator (works in Windows PowerShell 5.1 too).
+# Special characters are limited to  - _ . + : @ /  because they have no special meaning in
+# CMD/DOS (& | < > ^ % ! ( ) , ; = are), PowerShell ($ ` ' " # { } ; and @ at the start), Bash/sh
+# ($ ` \ ' " ! * ? [ ] { } ~ # & | ; < >) or MySQL string literals (' " \ `).
+# No kind of quote or apostrophe is ever used.
+# At least one digit, uppercase, lowercase and special character; the first character
+# is always a letter, so the password never looks like an option (-x, /x, +x).
+function New-RandomPassword([int]$Length = 32) {
+    $upper   = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    $lower   = 'abcdefghijklmnopqrstuvwxyz'
+    $digits  = '0123456789'
+    $special = '-_.+:@/'
+    $all     = $upper + $lower + $digits + $special
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $buffer = New-Object byte[] 4
+        # uniform index in [0, n): rejection sampling, no modulo bias
+        $next = {
+            param([int]$n)
+            $limit = [uint32]::MaxValue - ([uint32]::MaxValue % [uint32]$n)
+            do { $rng.GetBytes($buffer); $v = [BitConverter]::ToUInt32($buffer, 0) } while ($v -ge $limit)
+            return [int]($v % [uint32]$n)
+        }
+        $pick = { param([string]$set) $set[(& $next $set.Length)] }
+
+        $chars = New-Object System.Collections.Generic.List[char]
+        $chars.Add((& $pick $digits)); $chars.Add((& $pick $special))
+        $chars.Add((& $pick $upper));  $chars.Add((& $pick $lower))
+        while ($chars.Count -lt $Length - 1) { $chars.Add((& $pick $all)) }
+        for ($i = $chars.Count - 1; $i -gt 0; $i--) {          # Fisher-Yates shuffle
+            $j = & $next ($i + 1)
+            $t = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $t
+        }
+        $first = & $pick ($upper + $lower)                     # always starts with a letter
+        return ([string]$first) + (-join $chars)
+    }
+    finally { $rng.Dispose() }
+}
 
 function ConvertTo-SecretPrefix([string]$Prefix) {
     if (-not $Prefix) { return '' }
@@ -355,17 +419,34 @@ if (-not $keytool) {
 if ($keytool) { Write-Host "keytool: $keytool" -ForegroundColor Cyan }
 
 # --- 2. Passwords, generation, verification -----------------------------------
+$generatedPassword = $false
+if ($GeneratePassword -and -not $Generate) {
+    Write-Warning '-GeneratePassword is ignored: the keystore already exists, type its password.'
+    $GeneratePassword = $false
+}
 $envStore = 'NKB64_STORE_PASS'
 $envKey   = 'NKB64_KEY_PASS'
 $fingerprints = @()
 
 try {
     if ($Generate) {
-        $storePassword = Read-Password 'Keystore password' -Confirm -Help @(
-            'Password of the new keystore and its key (at least 8 characters, long and random is best).',
-            'Save it in a password manager: without it you can no longer sign updates of the app.',
-            "Goes into the secrets $($names.StorePassword) and $($names.KeyPassword) (same value in PKCS12)."
-        )
+        if (-not $GeneratePassword -and $wizard) {
+            $GeneratePassword = Read-YesNo 'Generate a random password?' -Help @(
+                "A $PasswordLength-character password with digits, uppercase and lowercase letters and - _ . + : @ /",
+                '(safe in CMD, PowerShell, Bash and MySQL). Answer n to type your own.'
+            )
+        }
+        if ($GeneratePassword) {
+            $storePassword = New-RandomPassword $PasswordLength
+            $generatedPassword = $true
+            Write-Host "`nRandom $PasswordLength-character password generated (shown at the end)." -ForegroundColor Cyan
+        } else {
+            $storePassword = Read-Password 'Keystore password' -Confirm -Help @(
+                'Password of the new keystore and its key (at least 8 characters, long and random is best).',
+                'Save it in a password manager: without it you can no longer sign updates of the app.',
+                "Goes into the secrets $($names.StorePassword) and $($names.KeyPassword) (same value in PKCS12)."
+            )
+        }
         $keyPassword = $storePassword
     } else {
         $storePassword = Read-Password 'Keystore password' -Help @(
@@ -462,6 +543,7 @@ $text.Add('Not secrets, for reference (Google Play Console, Firebase, F-Droid...
 $text.Add("  Alias:   $Alias")
 foreach ($f in $fingerprints) { $text.Add("  $f") }
 if ($Generate) {
+    if ($generatedPassword) { $text.Add("  Password: generated automatically ($PasswordLength characters)") }
     $text.Add("  Owner:   $DName")
     $text.Add("  Key:     RSA $KeySize, SHA256withRSA, valid $ValidityDays days")
 }
@@ -473,6 +555,12 @@ Write-Host ''
 Write-Host "Keystore : $KeystorePath ($($bytes.Length) bytes)" -ForegroundColor Green
 Write-Host "Secrets  : $OutputFile" -ForegroundColor Green
 foreach ($f in $fingerprints) { Write-Host "  $f" }
+
+if ($generatedPassword) {
+    Write-Host ''
+    Write-Host 'Generated password (keystore and key) - save it NOW in a password manager:' -ForegroundColor Yellow
+    Write-Host "  $storePassword" -ForegroundColor Yellow
+}
 
 if ($CopyToClipboard) {
     if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
